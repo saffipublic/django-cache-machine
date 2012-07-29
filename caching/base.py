@@ -41,7 +41,17 @@ class CachingManager(models.Manager):
         return super(CachingManager, self).contribute_to_class(cls, name)
 
     def post_save(self, instance, **kwargs):
+        '''
+        That is usual CM invalidation extended
+        to also invalidate user queries on INSERT
+        '''
+
         self.invalidate(instance)
+        # insert
+        if kwargs.get('created'):
+            user_keys = instance._cache_keys_of_user()
+            if user_keys:
+                invalidator.invalidate_keys(user_keys)
 
     def post_delete(self, instance, **kwargs):
         self.invalidate(instance)
@@ -70,7 +80,8 @@ class CacheMachine(object):
     called to get an iterator over some database results.
     """
 
-    def __init__(self, query_string, iter_function, timeout=None, db='default'):
+    def __init__(self, query_string, iter_function, timeout=None, db='default', by_pk=False):
+        self.by_pk = by_pk
         self.query_string = query_string
         self.iter_function = iter_function
         self.timeout = timeout
@@ -119,18 +130,49 @@ class CacheMachine(object):
             raise
 
     def cache_objects(self, objects):
-        """Cache query_key => objects, then update the flush lists."""
+        """Cache query_key => objects, then update the flush lists.
+        It calculate depenedency for the query (get by primary key has less dependency)
+        and add the dependency to the invalidator.
+
+        Cache query_key => objects, then update the flush lists.
+        added invalidate user keys
+        """
+
+        if len(objects) == 1 and self.by_pk:
+            # ignore all FKs - use only pk in cache key.
+            depend = [dummyObj4Key(obj.cache_key) for obj in objects if obj]
+        else:
+            keys = set([k for o in objects for k in o._cache_keys_of_user()])
+            depend = [dummyObj4Key(k) for k in keys if k]+objects
+
         query_key = self.query_key()
         query_flush = flush_key(self.query_string)
-        cache.add(query_key, objects, timeout=self.timeout)
-        invalidator.cache_objects(objects, query_key, query_flush)
+        invalidator.cache_objects(depend, query_key, query_flush)
 
+        # if no dependency don't cache since there would be nothing to invalidate it.
+        if depend:
+            cache.add(query_key, objects, timeout=self.timeout)
+
+pks_lst = set(['pk', 'id', 'id__exact'])
 
 class CachingQuerySet(models.query.QuerySet):
 
     def __init__(self, *args, **kw):
         super(CachingQuerySet, self).__init__(*args, **kw)
         self.timeout = None
+        self._by_pk = False
+
+    def filter_or_exclude(self, negate, *args, **kwargs):
+        by_pk=True
+        if negate:
+            by_pk=False
+        for key in kwargs.keys():
+            if key not in pks_lst:
+                by_pk=False
+        self._by_pk=by_pk
+
+        res = super(CachingQuerySet, self)._filter_or_exclude(negate, *args, **kwargs)
+        return res
 
     def flush_key(self):
         return flush_key(self.query_key())
@@ -151,7 +193,7 @@ class CachingQuerySet(models.query.QuerySet):
                 return iterator()
             if FETCH_BY_ID:
                 iterator = self.fetch_by_id
-            return iter(CacheMachine(query_string, iterator, self.timeout, db=self.db))
+            return iter(CacheMachine(query_string, iterator, self.timeout, db=self.db, by_pk=self._by_pk))
 
     def fetch_by_id(self):
         """
@@ -217,8 +259,22 @@ class CachingQuerySet(models.query.QuerySet):
     def _clone(self, *args, **kw):
         qs = super(CachingQuerySet, self)._clone(*args, **kw)
         qs.timeout = self.timeout
+        qs._by_pk = self._by_pk
+
         return qs
 
+def _cache_key(cls, pk):
+  """
+  Return a string that uniquely identifies the object.
+
+  For the Addon class, with a pk of 2, we get "o:addons.addon:2".
+  """
+  key_parts = ('o', cls._meta, pk)
+  return ':'.join(map(encoding.smart_unicode, key_parts))
+
+from django.contrib.auth.models import User
+# could be change extended to other FKS which are not CM
+_externalFKsClasses=[User]
 
 class CachingMixin:
     """Inherit from this class to get caching and invalidation helpers."""
@@ -238,8 +294,7 @@ class CachingMixin:
 
         For the Addon class, with a pk of 2, we get "o:addons.addon:2".
         """
-        key_parts = ('o', cls._meta, pk)
-        return ':'.join(map(encoding.smart_unicode, key_parts))
+        return _cache_key(cls,pk)
 
     def _cache_keys(self):
         """Return the cache key for self plus all related foreign keys."""
@@ -250,6 +305,37 @@ class CachingMixin:
                 if val is not None and hasattr(fk.rel.to, '_cache_key')]
         return (self.cache_key,) + tuple(keys)
 
+    def _cache_keys_of_user(self):
+        """Method for tracking FK to the user class which is not cached by CM,
+        indicating that we might want this user queries invalidated on insert,
+        Return all the user keys that should invalidate a query.
+        """
+        fks = dict((f, getattr(self, f.attname)) for f in self._meta.fields
+                    if isinstance(f, models.ForeignKey))
+        model_name = self.__class__.__name__
+        user_keys = ['CM_%s:%s' % (model_name, _cache_key(fk.rel.to, val)) for fk, val in fks.items()
+                   if val is not None and fk.rel.to in _externalFKsClasses]
+        if not user_keys:
+            return []
+        return set(user_keys)
+
+class dummyObj4Key(object):
+    '''
+    dummy "adapter" transfer object so current CM code can invalidate the keys
+    wrap keys for direct invalidation by key without actual object.
+    '''
+
+    def __init__(self, key):
+        self.cache_key = self.pk = key
+
+    def _cache_keys(self):
+        return self.cache_key,
+
+    def _cache_key(self, pk):
+        return pk
+
+    def flush_key(self):
+        return flush_key(self)
 
 class CachingRawQuerySet(models.query.RawQuerySet):
 
