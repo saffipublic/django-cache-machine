@@ -405,13 +405,24 @@ class CachingTestCase(ExtraAppTestCase):
     def test_empty_queryset(self):
         for k in (1, 1):
             with self.assertNumQueries(k):
-                eq_(len(Addon.objects.filter(pk=42)), 0)
+                eq_(len(Addon.objects.filter(author1=42)), 0)
 
     @mock.patch('caching.base.CACHE_EMPTY_QUERYSETS', True)
     def test_cache_empty_queryset(self):
         for k in (1, 0):
             with self.assertNumQueries(k):
+                eq_(len(Addon.objects.filter(author1=42)), 0)
+
+    def test_empty_queryset_pk(self):
+        for k in (1, 1):
+            with self.assertNumQueries(k):
                 eq_(len(Addon.objects.filter(pk=42)), 0)
+
+#    @mock.patch('caching.base.CACHE_EMPTY_QUERYSETS', True)
+#    def test_cache_empty_queryset_pk(self):
+#        for k in (1, 1):
+#            with self.assertNumQueries(k):
+#                eq_(len(Addon.objects.filter(pk=42)), 0)
 
     def test_invalidate_empty_queryset(self):
         u = User.objects.create()

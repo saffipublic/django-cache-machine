@@ -138,7 +138,7 @@ class CacheMachine(object):
         added invalidate user keys
         """
 
-        if len(objects) == 1 and self.by_pk:
+        if len(objects) == 1 and self.by_pk: # if pk & more then one result - it must be error!!
             # ignore all FKs - use only pk in cache key.
             depend = [dummyObj4Key(obj.cache_key) for obj in objects if obj]
         else:
@@ -149,8 +149,9 @@ class CacheMachine(object):
         query_flush = flush_key(self.query_string)
         invalidator.cache_objects(depend, query_key, query_flush)
 
+        should_cache = depend or CACHE_EMPTY_QUERYSETS and not self.by_pk
         # if no dependency don't cache since there would be nothing to invalidate it.
-        if depend:
+        if should_cache:
             cache.add(query_key, objects, timeout=self.timeout)
 
 pks_lst = set(['pk', 'id', 'id__exact'])
@@ -319,6 +320,7 @@ class CachingMixin:
             return []
         return set(user_keys)
 
+    
 class dummyObj4Key(object):
     '''
     dummy "adapter" transfer object so current CM code can invalidate the keys
